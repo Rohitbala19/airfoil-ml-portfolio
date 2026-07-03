@@ -324,6 +324,38 @@ def main():
         f_col2.metric("Max Camber (m/c)", f"{geom['max_camber']*100:.2f}%", f"at {geom['max_camber_loc']*100:.1f}% c")
         f_col3.metric("LE Radius (r_LE)", f"{geom['le_radius']*100:.3f}% c")
         
+        # Unsupervised Geometry Clustering Section
+        st.markdown("---")
+        st.markdown("### 🧩 Unsupervised Geometry Clustering (K-Means & GMM)")
+        
+        clusters_path = "data/processed/airfoil_clusters.csv"
+        if os.path.exists(clusters_path):
+            cluster_df = pd.read_csv(clusters_path)
+            # Normalise preset names to match
+            match = cluster_df[cluster_df['airfoil_name'].str.lower().str.replace(' ', '') == airfoil_name.lower().replace(' ', '')]
+            
+            if not match.empty:
+                km_c = int(match.iloc[0]['kmeans_cluster'])
+                gmm_c = int(match.iloc[0]['gmm_cluster'])
+                
+                # Explanations for the clusters
+                cluster_desc = {
+                    0: "🟢 **Cluster 0 (Symmetric & Thin):** Aerodynamically optimized for high-speed / aerobatic flight. Minimizes zero-lift drag.",
+                    1: "🔵 **Cluster 1 (Moderate Camber & Standard):** General aviation wing profiles. Provides stable lift slopes and moderate drag.",
+                    2: "🟣 **Cluster 2 (Thick & Highly Cambered):** Optimized for low speed, high-lift operations (UAVs, heavy cargo) at the cost of higher drag."
+                }
+                
+                c_col1, c_col2 = st.columns(2)
+                c_col1.info(f"**K-Means Label:** Cluster {km_c}")
+                c_col2.success(f"**GMM Label:** Cluster {gmm_c}")
+                
+                st.markdown(cluster_desc.get(km_c, "Custom profile shape."))
+            else:
+                st.info("💡 Custom designed profiles. Run `src/clustering.py` to cluster newly generated shape parameters.")
+        else:
+            st.info("💡 Run `python3 src/clustering.py` to fit the unsupervised clustering models.")
+
+        
     # Aerodynamic Computations
     solver = AirfoilSolver()
     

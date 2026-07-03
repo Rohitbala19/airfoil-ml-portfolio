@@ -402,7 +402,9 @@ def main():
             mlp_out = None
             
         if cnn is not None:
-            coords_t = torch.tensor(coords.T, dtype=torch.float32).unsqueeze(0)
+            x_res_cnn, y_res_cnn = resample_airfoil(coords, num_points=100)
+            coords_res = np.column_stack([x_res_cnn, y_res_cnn])
+            coords_t = torch.tensor(coords_res.T, dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 cnn_out = cnn(coords_t, alpha_t, re_t).numpy()[0]
         else:
@@ -548,7 +550,9 @@ def main():
         
         # PyTorch CNN
         if cnn is not None:
-            coords_t_polar = torch.tensor(coords.T, dtype=torch.float32).unsqueeze(0).repeat(len(alphas_polar), 1, 1)
+            x_res_polar, y_res_polar = resample_airfoil(coords, num_points=100)
+            coords_res_polar = np.column_stack([x_res_polar, y_res_polar])
+            coords_t_polar = torch.tensor(coords_res_polar.T, dtype=torch.float32).unsqueeze(0).repeat(len(alphas_polar), 1, 1)
             with torch.no_grad():
                 cnn_out_polar = cnn(coords_t_polar, alpha_t_polar, re_t_polar).numpy()
                 

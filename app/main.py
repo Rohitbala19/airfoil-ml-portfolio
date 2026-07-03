@@ -12,7 +12,8 @@ import joblib
 # Add project root to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.geometry import generate_naca_4_digit, extract_geometric_features, fit_cst, resample_airfoil
+from src.geometry import extract_geometric_features, fit_cst, resample_airfoil
+from src.generator import generate_naca_4_digit
 from src.solver import AirfoilSolver
 from src.models import AirfoilMLP, AirfoilCNN1D
 

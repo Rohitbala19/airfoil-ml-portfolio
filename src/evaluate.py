@@ -4,52 +4,43 @@ import time
 import numpy as np
 import pandas as pd
 import joblib
-import torch
 import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_absolute_error
 
 # Add project root to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.models import AirfoilMLP, AirfoilCNN1D
 from src.train import split_data_by_airfoil
 from src.solver import AirfoilSolver
 
-def load_all_models(cst_dim=12, device='cpu'):
-    # Load baselines
-    lr = joblib.load("models/weights/linear_regression.joblib")
+def load_all_models():
+    models_dir = "models/weights"
     
-    xgb_models = {}
-    for col in ['CL', 'CD', 'Cm']:
-        xgb_models[col] = joblib.load(f"models/weights/xgb_{col}.joblib")
-        
-    # Load PyTorch models
-    mlp = AirfoilMLP(cst_dim=cst_dim)
-    mlp.load_state_dict(torch.load("models/weights/airfoilmlp.pth", map_location=device))
-    mlp.eval()
-    
-    cnn = AirfoilCNN1D(coord_len=200)
-    cnn.load_state_dict(torch.load("models/weights/airfoilcnn1d.pth", map_location=device))
-    cnn.eval()
-    
-    return lr, xgb_models, mlp, cnn
+    models = {
+        'Linear Regression': joblib.load(os.path.join(models_dir, "linear_regression.joblib")),
+        'Polynomial Regression': joblib.load(os.path.join(models_dir, "polynomial_regression_deg_2.joblib")),
+        'KNN Regressor': joblib.load(os.path.join(models_dir, "k-nearest_neighbors_knn.joblib")),
+        'Decision Tree': joblib.load(os.path.join(models_dir, "decision_tree.joblib")),
+        'Random Forest': joblib.load(os.path.join(models_dir, "random_forest.joblib")),
+        'MLP Regressor': joblib.load(os.path.join(models_dir, "multi-layer_perceptron_mlp.joblib")),
+    }
+    return models
 
-def evaluate_inference_speed(coords, Re, lr, xgb_models, mlp, cnn, solver):
+def evaluate_inference_speed(coords, Re, models, solver):
     print("\n=== Inference Speed Benchmark ===")
     alphas = np.linspace(-5.0, 15.0, 100) # 100 test points
     
     # 1. Physics solver time (single alpha point)
-    start_time = time.time()
+    start_time = time.perf_counter()
     for alpha in alphas:
         _ = solver.solve(coords, alpha, Re)
-    solver_time = (time.time() - start_time) / len(alphas)
+    solver_time = (time.perf_counter() - start_time) / len(alphas)
     print(f"Physics Solver average time per run: {solver_time * 1000:.3f} ms")
     
     # Extract features for ML
     from src.geometry import extract_geometric_features, fit_cst
     geom = extract_geometric_features(coords)
     w_up, w_lo = fit_cst(coords, order=5)
-    cst = np.concatenate([w_up, w_lo])
     
     # Tabular input vector
     row_list = []
@@ -73,44 +64,15 @@ def evaluate_inference_speed(coords, Re, lr, xgb_models, mlp, cnn, solver):
     feature_cols = ['alpha', 'Re'] + list(geom.keys()) + [f'cst_up_{i}' for i in range(6)] + [f'cst_lo_{i}' for i in range(6)]
     X_input = df_input[feature_cols]
     
-    # 2. Linear Regression time
-    start_time = time.time()
-    for _ in range(10):
-        _ = lr.predict(X_input)
-    lr_time = (time.time() - start_time) / (10 * len(alphas))
-    print(f"Linear Regression average time:      {lr_time * 1000:.5f} ms (Speedup: {solver_time / (lr_time + 1e-9):.1f}x)")
-    
-    # 3. XGBoost time
-    start_time = time.time()
-    for _ in range(10):
-        _ = xgb_models['CL'].predict(X_input)
-        _ = xgb_models['CD'].predict(X_input)
-        _ = xgb_models['Cm'].predict(X_input)
-    xgb_time = (time.time() - start_time) / (10 * len(alphas))
-    print(f"XGBoost average time:                {xgb_time * 1000:.5f} ms (Speedup: {solver_time / (xgb_time + 1e-9):.1f}x)")
-    
-    # 4. PyTorch MLP time
-    cst_t = torch.tensor(X_input[[c for c in X_input.columns if c.startswith('cst_')]].values, dtype=torch.float32)
-    alpha_t = torch.tensor(X_input['alpha'].values, dtype=torch.float32).unsqueeze(1)
-    re_t = torch.tensor(X_input['Re'].values, dtype=torch.float32).unsqueeze(1)
-    
-    start_time = time.time()
-    with torch.no_grad():
-        for _ in range(10):
-            _ = mlp(cst_t, alpha_t, re_t)
-    mlp_time = (time.time() - start_time) / (10 * len(alphas))
-    print(f"PyTorch MLP average time:            {mlp_time * 1000:.5f} ms (Speedup: {solver_time / (mlp_time + 1e-9):.1f}x)")
-    
-    # 5. PyTorch CNN time
-    coords_t = torch.tensor(coords.T, dtype=torch.float32).unsqueeze(0).repeat(len(alphas), 1, 1)
-    start_time = time.time()
-    with torch.no_grad():
-        for _ in range(10):
-            _ = cnn(coords_t, alpha_t, re_t)
-    cnn_time = (time.time() - start_time) / (10 * len(alphas))
-    print(f"PyTorch CNN 1D average time:         {cnn_time * 1000:.5f} ms (Speedup: {solver_time / (cnn_time + 1e-9):.1f}x)")
+    # Run speedups for each scikit-learn model
+    for name, pipeline in models.items():
+        start_time = time.perf_counter()
+        for _ in range(20):
+            _ = pipeline.predict(X_input)
+        model_time = (time.perf_counter() - start_time) / (20 * len(alphas))
+        print(f"{name:<25} average time: {model_time * 1000:.5f} ms (Speedup: {solver_time / (model_time + 1e-9):.1f}x)")
 
-def run_error_analysis(test_df, lr, xgb_models, mlp, cnn):
+def run_error_analysis(test_df, models):
     print("\n=== Error Analysis on Test Airfoils ===")
     
     # Feature names
@@ -121,34 +83,13 @@ def run_error_analysis(test_df, lr, xgb_models, mlp, cnn):
     X_test = test_df[feature_cols]
     y_true = test_df[['CL', 'CD', 'Cm']].values
     
-    # Run predictions
-    pred_xgb = np.zeros_like(y_true)
-    pred_xgb[:, 0] = xgb_models['CL'].predict(X_test)
-    pred_xgb[:, 1] = xgb_models['CD'].predict(X_test)
-    pred_xgb[:, 2] = xgb_models['Cm'].predict(X_test)
-    
-    # Convert PyTorch models to cpu
-    mlp.cpu()
-    cnn.cpu()
-    
-    cst_t = torch.tensor(X_test[cst_cols].values, dtype=torch.float32)
-    alpha_t = torch.tensor(X_test['alpha'].values, dtype=torch.float32).unsqueeze(1)
-    re_t = torch.tensor(X_test['Re'].values, dtype=torch.float32).unsqueeze(1)
-    
-    with torch.no_grad():
-        pred_mlp = mlp(cst_t, alpha_t, re_t).numpy()
-        
-    coords_dict = np.load("data/processed/airfoil_coords.npz")
-    coords_list = []
-    for name in test_df['airfoil_name'].values:
-        coords_list.append(torch.tensor(coords_dict[name].T, dtype=torch.float32))
-    coords_t = torch.stack(coords_list)
-    
-    with torch.no_grad():
-        pred_cnn = cnn(coords_t, alpha_t, re_t).numpy()
+    # Get predictions
+    preds = {}
+    for name, pipeline in models.items():
+        preds[name] = pipeline.predict(X_test)
         
     # Analyze errors across different subsets:
-    # 1. Alpha ranges: pre-stall (-5 to 9) vs post-stall (10 to 15)
+    # 1. Alpha ranges: pre-stall (< 10) vs post-stall (>= 10)
     pre_stall_idx = test_df['alpha'] < 10.0
     post_stall_idx = test_df['alpha'] >= 10.0
     
@@ -173,19 +114,15 @@ def run_error_analysis(test_df, lr, xgb_models, mlp, cnn):
             continue
             
         y_true_sub = y_true[mask]
-        preds = {
-            'XGBoost': pred_xgb[mask],
-            'MLP': pred_mlp[mask],
-            'CNN 1D': pred_cnn[mask]
-        }
         
-        for model_name, y_pred_sub in preds.items():
+        for model_name, y_pred in preds.items():
+            y_pred_sub = y_pred[mask]
             mae_cl = mean_absolute_error(y_true_sub[:, 0], y_pred_sub[:, 0])
             mae_cd = mean_absolute_error(y_true_sub[:, 1], y_pred_sub[:, 1])
             mae_cm = mean_absolute_error(y_true_sub[:, 2], y_pred_sub[:, 2])
             print(f"| {sub_name} | {model_name} | {mae_cl:.4f} | {mae_cd:.4f} | {mae_cm:.4f} |")
 
-def plot_polar_curves(test_df, xgb_models, mlp, cnn, solver):
+def plot_polar_curves(test_df, models, solver):
     print("\n=== Generating Polar Curve Visualizations ===")
     test_airfoils = test_df['airfoil_name'].unique()
     if len(test_airfoils) == 0:
@@ -200,7 +137,6 @@ def plot_polar_curves(test_df, xgb_models, mlp, cnn, solver):
     from src.geometry import extract_geometric_features, fit_cst
     geom = extract_geometric_features(coords)
     w_up, w_lo = fit_cst(coords, order=5)
-    cst = np.concatenate([w_up, w_lo])
     
     alphas = np.arange(-5.0, 16.0, 1.0)
     Re = 1e6
@@ -211,7 +147,7 @@ def plot_polar_curves(test_df, xgb_models, mlp, cnn, solver):
     cd_gt = [r['CD'] for r in solver_results]
     cm_gt = [r['Cm'] for r in solver_results]
     
-    # Construct input dataframe for XGBoost
+    # Construct input dataframe for evaluation
     rows = []
     for a in alphas:
         row = {
@@ -232,60 +168,51 @@ def plot_polar_curves(test_df, xgb_models, mlp, cnn, solver):
     df_eval = pd.DataFrame(rows)
     feature_cols = ['alpha', 'Re'] + list(geom.keys()) + [f'cst_up_{i}' for i in range(6)] + [f'cst_lo_{i}' for i in range(6)]
     
-    # XGBoost Predictions
-    cl_xgb = xgb_models['CL'].predict(df_eval[feature_cols])
-    cd_xgb = xgb_models['CD'].predict(df_eval[feature_cols])
-    cm_xgb = xgb_models['Cm'].predict(df_eval[feature_cols])
-    
-    # PyTorch Predictions
-    cst_t = torch.tensor(df_eval[[c for c in df_eval.columns if c.startswith('cst_')]].values, dtype=torch.float32)
-    alpha_t = torch.tensor(df_eval['alpha'].values, dtype=torch.float32).unsqueeze(1)
-    re_t = torch.tensor(df_eval['Re'].values, dtype=torch.float32).unsqueeze(1)
-    
-    mlp.cpu()
-    cnn.cpu()
-    with torch.no_grad():
-        mlp_out = mlp(cst_t, alpha_t, re_t).numpy()
-        
-    coords_t = torch.tensor(coords.T, dtype=torch.float32).unsqueeze(0).repeat(len(alphas), 1, 1)
-    with torch.no_grad():
-        cnn_out = cnn(coords_t, alpha_t, re_t).numpy()
+    # Predict curves
+    preds_curves = {}
+    for name, pipeline in models.items():
+        preds_curves[name] = pipeline.predict(df_eval[feature_cols])
         
     # Plotting
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
+    # Set custom colors
+    colors = {
+        'Linear Regression': '#e11d48',
+        'Polynomial Regression': '#ea580c',
+        'KNN Regressor': '#16a34a',
+        'Decision Tree': '#2563eb',
+        'Random Forest': '#9333ea',
+        'MLP Regressor': '#0ea5e9'
+    }
+    
     # CL vs Alpha
-    axes[0].plot(alphas, cl_gt, 'k-', linewidth=2, label='Solver (GT)')
-    axes[0].plot(alphas, cl_xgb, 'r--', label='XGBoost')
-    axes[0].plot(alphas, mlp_out[:, 0], 'g:', label='MLP (CST)')
-    axes[0].plot(alphas, cnn_out[:, 0], 'b-.', label='CNN (Raw)')
+    axes[0].plot(alphas, cl_gt, 'k-', linewidth=3, label='Solver (GT)')
+    for name, pred in preds_curves.items():
+        axes[0].plot(alphas, pred[:, 0], '--', color=colors[name], label=name)
     axes[0].set_xlabel('Angle of Attack (deg)')
     axes[0].set_ylabel('Lift Coefficient (CL)')
     axes[0].set_title('Lift Polar Curve')
     axes[0].grid(True)
-    axes[0].legend()
+    axes[0].legend(fontsize=9)
     
     # CD vs Alpha
-    axes[1].plot(alphas, cd_gt, 'k-', linewidth=2, label='Solver (GT)')
-    axes[1].plot(alphas, cd_xgb, 'r--', label='XGBoost')
-    axes[1].plot(alphas, mlp_out[:, 1], 'g:', label='MLP (CST)')
-    axes[1].plot(alphas, cnn_out[:, 1], 'b-.', label='CNN (Raw)')
+    axes[1].plot(alphas, cd_gt, 'k-', linewidth=3, label='Solver (GT)')
+    for name, pred in preds_curves.items():
+        axes[1].plot(alphas, pred[:, 1], '--', color=colors[name], label=name)
     axes[1].set_xlabel('Angle of Attack (deg)')
     axes[1].set_ylabel('Drag Coefficient (CD)')
     axes[1].set_title('Drag Polar Curve')
     axes[1].grid(True)
-    axes[1].legend()
     
     # Cm vs Alpha
-    axes[2].plot(alphas, cm_gt, 'k-', linewidth=2, label='Solver (GT)')
-    axes[2].plot(alphas, cm_xgb, 'r--', label='XGBoost')
-    axes[2].plot(alphas, mlp_out[:, 2], 'g:', label='MLP (CST)')
-    axes[2].plot(alphas, cnn_out[:, 2], 'b-.', label='CNN (Raw)')
+    axes[2].plot(alphas, cm_gt, 'k-', linewidth=3, label='Solver (GT)')
+    for name, pred in preds_curves.items():
+        axes[2].plot(alphas, pred[:, 2], '--', color=colors[name], label=name)
     axes[2].set_xlabel('Angle of Attack (deg)')
     axes[2].set_ylabel('Pitching Moment (Cm)')
     axes[2].set_title('Pitching Moment Polar Curve')
     axes[2].grid(True)
-    axes[2].legend()
     
     plt.suptitle(f"Aerodynamic Polar Predictions Comparison for Unseen Airfoil: {airfoil_name} at Re = {Re:,.0f}", fontsize=14, y=1.02)
     plt.tight_layout()
@@ -304,27 +231,24 @@ def main():
         return
         
     df = pd.read_csv(dataset_path)
-    _, _, test_df, _, _, _ = split_data_by_airfoil(df)
-    
-    # Find CST dimension from columns
-    cst_dim = len([c for c in df.columns if c.startswith('cst_')])
+    _, test_df = split_data_by_airfoil(df)
     
     print("Loading models for evaluation...")
-    lr, xgb_models, mlp, cnn = load_all_models(cst_dim=cst_dim)
+    models = load_all_models()
     
     solver = AirfoilSolver()
     
-    # Inference Speed Benchmark (using NACA 0012 coordinates from test_df if available)
+    # Inference Speed Benchmark
     coords_dict = np.load("data/processed/airfoil_coords.npz")
     airfoil_name = test_df['airfoil_name'].iloc[0]
     coords = coords_dict[airfoil_name]
-    evaluate_inference_speed(coords, 1e6, lr, xgb_models, mlp, cnn, solver)
+    evaluate_inference_speed(coords, 1e6, models, solver)
     
     # Error analysis
-    run_error_analysis(test_df, lr, xgb_models, mlp, cnn)
+    run_error_analysis(test_df, models)
     
     # Plotting
-    plot_polar_curves(test_df, xgb_models, mlp, cnn, solver)
+    plot_polar_curves(test_df, models, solver)
 
 if __name__ == "__main__":
     main()

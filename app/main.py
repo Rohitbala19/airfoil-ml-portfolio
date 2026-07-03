@@ -3,7 +3,6 @@ import sys
 import time
 import numpy as np
 import pandas as pd
-import torch
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -13,9 +12,8 @@ import joblib
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.geometry import extract_geometric_features, fit_cst, resample_airfoil
-from src.generator import generate_naca_4_digit
 from src.solver import AirfoilSolver
-from src.models import AirfoilMLP, AirfoilCNN1D
+from src.generator import generate_naca_4_digit
 
 # Set Page Config
 st.set_page_config(
@@ -165,52 +163,33 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper function to load all models
+# Helper function to load all scikit-learn models
 @st.cache_resource
 def load_surrogate_models():
     models_dir = "models/weights"
     if not os.path.exists(models_dir):
-        return None, None, None
+        return None
         
     try:
-        # Load XGBoost models
-        xgb_models = {}
-        for col in ['CL', 'CD', 'Cm']:
-            path = os.path.join(models_dir, f"xgb_{col}.joblib")
-            if os.path.exists(path):
-                xgb_models[col] = joblib.load(path)
-            else:
-                return None, None, None
-                
-        # Load MLP
-        mlp = AirfoilMLP(cst_dim=12)
-        mlp_path = os.path.join(models_dir, "airfoilmlp.pth")
-        if os.path.exists(mlp_path):
-            mlp.load_state_dict(torch.load(mlp_path, map_location='cpu'))
-            mlp.eval()
-        else:
-            mlp = None
-            
-        # Load CNN
-        cnn = AirfoilCNN1D(coord_len=200)
-        cnn_path = os.path.join(models_dir, "airfoilcnn1d.pth")
-        if os.path.exists(cnn_path):
-            cnn.load_state_dict(torch.load(cnn_path, map_location='cpu'))
-            cnn.eval()
-        else:
-            cnn = None
-            
-        return xgb_models, mlp, cnn
+        models = {
+            'Linear Regression': joblib.load(os.path.join(models_dir, "linear_regression.joblib")),
+            'Polynomial Regression': joblib.load(os.path.join(models_dir, "polynomial_regression_deg_2.joblib")),
+            'KNN Regressor': joblib.load(os.path.join(models_dir, "k-nearest_neighbors_knn.joblib")),
+            'Decision Tree': joblib.load(os.path.join(models_dir, "decision_tree.joblib")),
+            'Random Forest': joblib.load(os.path.join(models_dir, "random_forest.joblib")),
+            'MLP Regressor': joblib.load(os.path.join(models_dir, "multi-layer_perceptron_mlp.joblib")),
+        }
+        return models
     except Exception as e:
         st.warning(f"Could not load trained models: {e}. Running solver mode only.")
-        return None, None, None
+        return None
 
 def main():
     # Header Title
     st.markdown("""
     <div class="header-container">
         <h1 class="title-main">AeroML Surrogate Studio</h1>
-        <p class="subtitle-main">Deep learning & machine learning aerodynamic surrogate modeling in real-time, benchmarked against XFOIL physics</p>
+        <p class="subtitle-main">Fundamental Machine Learning surrogate modeling in real-time, benchmarked against physical solver polars</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -283,7 +262,6 @@ def main():
     # Geometry Analysis
     geom = extract_geometric_features(coords)
     w_up, w_lo = fit_cst(coords, order=5)
-    cst = np.concatenate([w_up, w_lo])
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🌬️ Flow Conditions")
@@ -355,17 +333,14 @@ def main():
     t_phys = time.perf_counter() - t_start
     
     # Try loading ML model predictions
-    xgb_models, mlp, cnn = load_surrogate_models()
+    models = load_surrogate_models()
     
-    # Prepare input arrays for ML
-    xgb_val = None
-    mlp_val = None
-    cnn_val = None
+    # Run predictions dynamically
+    predictions = {}
+    t_ml = {}
     
-    t_ml = 0
-    
-    if xgb_models is not None:
-        # Create input features
+    if models is not None:
+        # Create input feature row
         feature_dict = {
             'alpha': alpha,
             'Re': Re,
@@ -384,65 +359,41 @@ def main():
         feature_cols = ['alpha', 'Re'] + list(geom.keys()) + [f'cst_up_{i}' for i in range(6)] + [f'cst_lo_{i}' for i in range(6)]
         X_ml = df_ml[feature_cols]
         
-        # Measure ML speed (XGBoost, MLP, CNN cumulative or individual)
-        t_ml_start = time.perf_counter()
-        
-        # Run predictions
-        cl_xgb = xgb_models['CL'].predict(X_ml)[0]
-        cd_xgb = xgb_models['CD'].predict(X_ml)[0]
-        cm_xgb = xgb_models['Cm'].predict(X_ml)[0]
-        
-        if mlp is not None:
-            cst_t = torch.tensor(X_ml[[c for c in X_ml.columns if c.startswith('cst_')]].values, dtype=torch.float32)
-            alpha_t = torch.tensor([alpha], dtype=torch.float32).unsqueeze(1)
-            re_t = torch.tensor([Re], dtype=torch.float32).unsqueeze(1)
-            with torch.no_grad():
-                mlp_out = mlp(cst_t, alpha_t, re_t).numpy()[0]
-        else:
-            mlp_out = None
+        # Predict values and time for each model
+        for name, pipeline in models.items():
+            t_ml_start = time.perf_counter()
+            out = pipeline.predict(X_ml)[0]
+            t_ml[name] = time.perf_counter() - t_ml_start
+            predictions[name] = out
             
-        if cnn is not None:
-            x_res_cnn, y_res_cnn = resample_airfoil(coords, num_points=100)
-            coords_res = np.column_stack([x_res_cnn, y_res_cnn])
-            coords_t = torch.tensor(coords_res.T, dtype=torch.float32).unsqueeze(0)
-            with torch.no_grad():
-                cnn_out = cnn(coords_t, alpha_t, re_t).numpy()[0]
-        else:
-            cnn_out = None
-            
-        t_ml = time.perf_counter() - t_ml_start
-        
     with col_metrics:
         st.markdown("### ⚡ Live Aero Coefficients")
         
         # Display in columns
         c_l, c_d, c_m = st.columns(3)
         
-        # We display the selected model predictions or the physics solver
+        # Model selector dropdown
+        model_options = ["Physics Solver (Ground Truth)"]
+        if models is not None:
+            model_options.extend(list(models.keys()))
+            
         model_choice = st.selectbox(
             "Select Prediction Engine",
-            ["XFOIL / Physics Solver", "XGBoost Surrogate", "PyTorch MLP (CST)", "PyTorch CNN (Raw Coords)"] if xgb_models is not None else ["XFOIL / Physics Solver"]
+            model_options
         )
         
         val_cl, val_cd, val_cm = 0.0, 0.0, 0.0
         engine_source = ""
+        infer_time = 0.0
         
-        if model_choice == "XFOIL / Physics Solver":
+        if model_choice == "Physics Solver (Ground Truth)":
             val_cl, val_cd, val_cm = phys_result['CL'], phys_result['CD'], phys_result['Cm']
             engine_source = f"Physics Model ({phys_result['source']})"
             infer_time = t_phys
-        elif model_choice == "XGBoost Surrogate":
-            val_cl, val_cd, val_cm = cl_xgb, cd_xgb, cm_xgb
-            engine_source = "XGBoost Tabular"
-            infer_time = t_ml / 3.0
-        elif model_choice == "PyTorch MLP (CST)":
-            val_cl, val_cd, val_cm = mlp_out[0], mlp_out[1], mlp_out[2]
-            engine_source = "Deep Learning MLP"
-            infer_time = t_ml / 3.0
         else:
-            val_cl, val_cd, val_cm = cnn_out[0], cnn_out[1], cnn_out[2]
-            engine_source = "Deep Learning 1D CNN"
-            infer_time = t_ml / 3.0
+            val_cl, val_cd, val_cm = predictions[model_choice][0], predictions[model_choice][1], predictions[model_choice][2]
+            engine_source = model_choice
+            infer_time = t_ml[model_choice]
             
         c_l.markdown(f"""
         <div class="metric-card">
@@ -479,7 +430,7 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        if model_choice != "XFOIL / Physics Solver" and t_ml > 0:
+        if model_choice != "Physics Solver (Ground Truth)" and infer_time > 0:
             speedup = t_phys / (infer_time + 1e-9)
             speed_col2.markdown(f"""
             <div class="speedup-badge">
@@ -512,8 +463,7 @@ def main():
         cd_gt_polar.append(res['CD'])
         cm_gt_polar.append(res['Cm'])
         
-    # Generate ML polars if models are available
-    show_ml_polars = (xgb_models is not None)
+    show_ml_polars = (models is not None)
     
     if show_ml_polars:
         rows_polar = []
@@ -535,27 +485,11 @@ def main():
             
         df_polar = pd.DataFrame(rows_polar)
         
-        # XGBoost
-        cl_xgb_polar = xgb_models['CL'].predict(df_polar[feature_cols])
-        cd_xgb_polar = xgb_models['CD'].predict(df_polar[feature_cols])
-        cm_xgb_polar = xgb_models['Cm'].predict(df_polar[feature_cols])
-        
-        # PyTorch MLP
-        if mlp is not None:
-            cst_t_polar = torch.tensor(df_polar[[c for c in df_polar.columns if c.startswith('cst_')]].values, dtype=torch.float32)
-            alpha_t_polar = torch.tensor(df_polar['alpha'].values, dtype=torch.float32).unsqueeze(1)
-            re_t_polar = torch.tensor(df_polar['Re'].values, dtype=torch.float32).unsqueeze(1)
-            with torch.no_grad():
-                mlp_out_polar = mlp(cst_t_polar, alpha_t_polar, re_t_polar).numpy()
-        
-        # PyTorch CNN
-        if cnn is not None:
-            x_res_polar, y_res_polar = resample_airfoil(coords, num_points=100)
-            coords_res_polar = np.column_stack([x_res_polar, y_res_polar])
-            coords_t_polar = torch.tensor(coords_res_polar.T, dtype=torch.float32).unsqueeze(0).repeat(len(alphas_polar), 1, 1)
-            with torch.no_grad():
-                cnn_out_polar = cnn(coords_t_polar, alpha_t_polar, re_t_polar).numpy()
-                
+        # Predict polar curves
+        polars_pred = {}
+        for name, pipeline in models.items():
+            polars_pred[name] = pipeline.predict(df_polar[feature_cols])
+            
     # Plotly figures layout (3 subplots in a row)
     fig_polars = make_subplots(rows=1, cols=3, subplot_titles=(
         "Lift Polar (C<sub>L</sub> vs &alpha;)",
@@ -566,43 +500,38 @@ def main():
     # Color scheme
     colors = {
         'gt': '#f1f5f9',
-        'xgb': '#ef4444',
-        'mlp': '#22c55e',
-        'cnn': '#a855f7'
+        'Linear Regression': '#e11d48',
+        'Polynomial Regression': '#ea580c',
+        'KNN Regressor': '#16a34a',
+        'Decision Tree': '#2563eb',
+        'Random Forest': '#9333ea',
+        'MLP Regressor': '#0ea5e9'
     }
     
     # Trace 1: CL vs Alpha
     fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cl_gt_polar, name="Physics Solver (GT)", line=dict(color=colors['gt'], width=2.5)), row=1, col=1)
     if show_ml_polars:
-        fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cl_xgb_polar, name="XGBoost", line=dict(color=colors['xgb'], dash='dash', width=2)), row=1, col=1)
-        if mlp is not None:
-            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=mlp_out_polar[:, 0], name="PyTorch MLP", line=dict(color=colors['mlp'], dash='dot', width=2)), row=1, col=1)
-        if cnn is not None:
-            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cnn_out_polar[:, 0], name="PyTorch CNN", line=dict(color=colors['cnn'], dash='dashdot', width=2)), row=1, col=1)
+        for name, pred in polars_pred.items():
+            # Plot select core models to prevent cluttering or plot all with thin lines
+            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=pred[:, 0], name=name, line=dict(color=colors[name], dash='dash', width=1.5)), row=1, col=1)
             
     # Trace 2: CD vs Alpha
     fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cd_gt_polar, name="Physics Solver (GT)", line=dict(color=colors['gt'], width=2.5), showlegend=False), row=1, col=2)
     if show_ml_polars:
-        fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cd_xgb_polar, name="XGBoost", line=dict(color=colors['xgb'], dash='dash', width=2), showlegend=False), row=1, col=2)
-        if mlp is not None:
-            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=mlp_out_polar[:, 1], name="PyTorch MLP", line=dict(color=colors['mlp'], dash='dot', width=2), showlegend=False), row=1, col=2)
-        if cnn is not None:
-            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=cnn_out_polar[:, 1], name="PyTorch CNN", line=dict(color=colors['cnn'], dash='dashdot', width=2), showlegend=False), row=1, col=2)
+        for name, pred in polars_pred.items():
+            fig_polars.add_trace(go.Scatter(x=alphas_polar, y=pred[:, 1], name=name, line=dict(color=colors[name], dash='dash', width=1.5), showlegend=False), row=1, col=2)
             
     # Trace 3: CL vs CD (Drag Polar)
     fig_polars.add_trace(go.Scatter(x=cd_gt_polar, y=cl_gt_polar, name="Physics Solver (GT)", line=dict(color=colors['gt'], width=2.5), showlegend=False), row=1, col=3)
     if show_ml_polars:
-        fig_polars.add_trace(go.Scatter(x=cd_xgb_polar, y=cl_xgb_polar, name="XGBoost", line=dict(color=colors['xgb'], dash='dash', width=2), showlegend=False), row=1, col=3)
-        if mlp is not None:
-            fig_polars.add_trace(go.Scatter(x=mlp_out_polar[:, 1], y=mlp_out_polar[:, 0], name="PyTorch MLP", line=dict(color=colors['mlp'], dash='dot', width=2), showlegend=False), row=1, col=3)
-        if cnn is not None:
-            fig_polars.add_trace(go.Scatter(x=cnn_out_polar[:, 1], y=cnn_out_polar[:, 0], name="PyTorch CNN", line=dict(color=colors['cnn'], dash='dashdot', width=2), showlegend=False), row=1, col=3)
+        for name, pred in polars_pred.items():
+            fig_polars.add_trace(go.Scatter(x=pred[:, 1], y=pred[:, 0], name=name, line=dict(color=colors[name], dash='dash', width=1.5), showlegend=False), row=1, col=3)
             
     # Style plots
     fig_polars.update_layout(
         plot_bgcolor='rgba(15,23,42,0.5)',
         paper_bgcolor='rgba(0,0,0,0)',
-        height=400,
+        height=450,
         margin=dict(l=20, r=20, t=40, b=20),
         legend=dict(
             orientation="h",
@@ -626,7 +555,7 @@ def main():
     if not show_ml_polars:
         st.info("💡 Pro-Tip: Once you finish training the ML models, they will automatically be displayed here. To start training, run: `python3 src/train.py`.")
     else:
-        st.success("🤖 Machine learning surrogate models are active! The MLP uses Class-Shape Transformation (CST) geometry representation, while the 1D CNN processes raw coordinate shape signals directly.")
+        st.success("🤖 Core machine learning surrogate models are active! The studio compares Linear and Polynomial regressions, distance-based KNN, tree-based models, and feedforward Artificial Neural Networks (MLP).")
 
 if __name__ == "__main__":
     main()

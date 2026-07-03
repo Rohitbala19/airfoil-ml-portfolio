@@ -1,21 +1,12 @@
 # AeroML Surrogate Studio: Airfoil Aerodynamic ML Surrogate Model
 
-A portfolio-grade machine learning project implementing real-time aerodynamic coefficient prediction ($C_L, C_D, C_m$) of 2D airfoils as a function of geometry, angle of attack ($\alpha$), and Reynolds number ($Re$), benchmarked against XFOIL.
+A course portfolio-grade machine learning project implementing real-time aerodynamic coefficient prediction ($C_L, C_D, C_m$) of 2D airfoils as a function of geometry, angle of attack ($\alpha$), and Reynolds number ($Re$), benchmarked against physical solver data.
 
-## Project Overview
-Aerodynamic shape design optimization is traditionally bottlenecked by the computational cost of CFD (Computational Fluid Dynamics) or panel method viscous-inviscid solvers like XFOIL. This project demonstrates how Machine Learning (ML) surrogate models can accelerate aerodynamic analysis by up to **2,000x**, enabling instant design space exploration and real-time interactive design.
-
-### Key Highlights
-- **Real-time Design Interface:** Built an interactive Streamlit dashboard allowing users to dynamically sculpt custom NACA airfoils and inspect predicted lift/drag polars in real-time.
-- **Dual-Mode Physics Engine:** Implemented a robust aerodynamic simulator interface. It automatically runs local XFOIL via a subprocess wrapper or falls back to a high-fidelity Python-native physics-based solver (thin airfoil theory Fourier coefficients + transitional flat-plate skin friction + viscous form factor + empirical stall models).
-- **Multiple Geometry Representations:** Benchmarked tabular models (XGBoost) and deep learning models (PyTorch MLP and PyTorch 1D CNN) utilizing different geometric representations:
-  - **Option A (Raw Coordinates):** Cosine-spaced coordinates passed through a 1D Convolutional Neural Network.
-  - **Option B (Parametric CST):** Class-Shape Transformation (CST/Kulfan) coefficients fitted via linear least-squares.
-- **Rigor in ML Evaluation:** Implemented **Split-by-Airfoil validation** (completely holding out validation and test airfoils rather than splitting randomly by row) to evaluate model generalization to entirely *unseen* shape geometries, representing a true engineering design scenario.
+This project is tailored for **Fundamentals of Machine Intelligence and Data Science** courses, demonstrating standard machine learning regression algorithms, data preprocessing, feature engineering, group-based train/test splits, and model evaluations using standard metrics.
 
 ---
 
-## Technical Architecture
+## 🛠️ Project Architecture
 
 ```
 airfoil-ml-portfolio/
@@ -26,7 +17,7 @@ airfoil-ml-portfolio/
 │   ├── geometry.py          # Coordinates resampling, CST fitting, geometric features
 │   ├── solver.py            # Dual-mode solver interface (XFOIL + custom fallback)
 │   ├── generator.py         # Batch runner to build database
-│   ├── models.py            # XGBoost, PyTorch MLP (CST), PyTorch 1D CNN
+│   ├── models.py            # Standard Scikit-Learn models definitions
 │   ├── train.py             # Split-by-airfoil training loops
 │   └── evaluate.py          # Inference speed benchmarks & error analysis
 ├── app/
@@ -37,26 +28,31 @@ airfoil-ml-portfolio/
 └── README.md                # This documentation
 ```
 
-### 1. Data Collection & Generation (`src/generator.py`)
-- Automatically downloads airfoil coordinate datasets from the Seligs UIUC Airfoil Database.
-- Synthesizes analytical NACA 4-digit profiles to guarantee complete geometric coverage.
-- Solves for $C_L, C_D, C_m$ across a dense operational envelope:
-  - $\alpha \in [-5^\circ, 15^\circ]$ in $1^\circ$ increments.
-  - $Re \in [10^5, 5 \times 10^5, 10^6, 3 \times 10^6]$.
+---
 
-### 2. Geometry Feature Engineering (`src/geometry.py`)
-- **Resampling:** Uniformly resamples coordinates into 200 cosine-spaced points (TE $\rightarrow$ LE $\rightarrow$ TE).
-- **CST Parameterization:** Fits 5th-order Bernstein polynomials ($A_u, A_l$) using linear least-squares.
-- **Geometric Extraction:** Automatically calculates leading-edge radius ($r_{LE}$), maximum camber ($m/c$), maximum thickness ($t/c$), and chord-wise positions.
+## 📈 Core Data Science Concepts Covered
 
-### 3. Machine Learning Models (`src/models.py`)
-- **XGBoost:** A gradient boosting regressor baseline mapping tabular geometry features + flow conditions to coefficients.
-- **PyTorch MLP:** Map CST parameters + flow conditions to outputs.
-- **PyTorch 1D CNN:** Convolves 1D kernels over the $2 \times 200$ coordinate shape signals, concatenating resulting geometric features with flow conditions to predict coefficients.
+### 1. Data Cleaning & Feature Engineering (`src/geometry.py`)
+- **Uniform Cosine Resampling:** Translates raw, unevenly spaced coordinates into exactly 200 points spaced using a cosine function, capturing high-curvature leading edges.
+- **Dimensionality Reduction (CST Parametrization):** Instead of using 200 coordinate dimensions, we fit a 5th-order **Class-Shape Transformation (CST)** curve using **Linear Least Squares Regression** to represent the airfoil shape using just 12 Bernstein coefficients.
+- **Hand-Crafted Features:** Extracts maximum thickness, camber, their chord locations, and leading-edge radius ($r_{LE}$) as explicit features.
+
+### 2. Group-Based Validation (Avoiding Data Leakage)
+In standard data science, splitting datasets randomly by row causes **data leakage** because parts of the same airfoil shape are shared between train and test sets. 
+To ensure true evaluation of generalization, we split by **Airfoil Profile Group** (32 train, 7 validation, 7 test). The test set consists of completely *unseen* airfoil shapes, mimicking a real design setting.
+
+### 3. Model Zoo: Fundamental Regressors (`src/models.py`)
+We benchmark six fundamental supervised regression algorithms from **Scikit-Learn**:
+1. **Linear Regression:** Baseline ordinary least squares model. Underfits significantly on non-linear components (like Drag).
+2. **Polynomial Regression (Degree 2):** Maps features into a higher-dimensional polynomial space, capturing local quadratic interactions (e.g. lift-to-drag curves).
+3. **K-Nearest Neighbors (KNN):** Distance-based non-parametric regressor.
+4. **Decision Tree:** Single tree partition structure.
+5. **Random Forest:** Ensemble bagging technique combining 100 decision trees to reduce variance.
+6. **Multi-Layer Perceptron (MLP):** A fundamental fully connected Feedforward Artificial Neural Network trained using backpropagation.
 
 ---
 
-## Installation & Getting Started
+## 🚀 Getting Started
 
 ### 1. Set Up Environment
 ```bash
@@ -73,62 +69,56 @@ pip install -r requirements.txt
 ```
 
 ### 2. Generate the Dataset
-Create the local dataset by running the batch simulator script:
+Compile the local dataset using our solver:
 ```bash
 python3 src/generator.py
 ```
-This generates:
-- `data/processed/airfoil_dataset.csv` (Tabular database)
-- `data/processed/airfoil_coords.npz` (Numpy arrays of resampled coordinate loops)
 
 ### 3. Run Verification Tests
 ```bash
 python3 tests/verify.py
 ```
 
-### 4. Train the Surrogate Models
+### 4. Train the Supervised Models
 ```bash
-python3 src/train.py
+./run_training.sh
 ```
-Model checkpoints and parameters will be saved in `models/weights/`.
+All models are standard standardized pipelines saved to `models/weights/`.
 
-### 5. Evaluate Performance & Benchmarks
+### 5. Run Benchmarks & Visualizations
 ```bash
-python3 src/evaluate.py
+./run_evaluation.sh
 ```
-This prints the detailed speedups and error tables, and saves a performance plot at `data/processed/polar_comparison.png`.
+This performs inference speed comparisons and exports a comparison chart at `data/processed/polar_comparison.png`.
 
 ### 6. Launch the Interactive Studio
 ```bash
-streamlit run app/main.py
+./run_studio.sh
 ```
 
 ---
 
-## Performance Evaluation & Error Analysis
-
-The models are tested on **completely unseen airfoil geometries** (validation shapes were not present in training). 
+## 📊 Performance Benchmarks (On Unseen Airfoils)
 
 ### Speedup Benchmark (Average Inference Time per Prediction)
-| Solver / Model | Inference Time (ms) | Speedup Factor |
+| Model | Inference Time (ms) | Speedup Factor |
 |---|---|---|
-| Physics Solver / XFOIL | ~15.20 ms | 1.0x (Baseline) |
-| XGBoost Surrogate | ~0.08 ms | ~190x Faster |
-| PyTorch MLP (CST) | ~0.02 ms | ~760x Faster |
-| PyTorch 1D CNN (Raw Coords) | ~0.03 ms | ~500x Faster |
+| Physics Solver | ~0.193 ms | 1.0x (Baseline) |
+| Linear Regression | ~0.008 ms | ~23x Faster |
+| Decision Tree | ~0.002 ms | ~73x Faster |
+| MLP Regressor | ~0.004 ms | ~45x Faster |
 
-### Error Analysis (MAE on Unseen Airfoil Profiles)
+### Error Analysis (MAE on Test Airfoils)
 | Subset | Model | CL MAE | CD MAE | Cm MAE |
 |---|---|---|---|---|
-| **All Test Conditions** | XGBoost | 0.048 | 0.0031 | 0.0094 |
-| | PyTorch MLP | 0.035 | 0.0022 | 0.0071 |
-| | PyTorch 1D CNN | 0.039 | 0.0025 | 0.0080 |
-| **Pre-stall ($\alpha < 10^\circ$)** | PyTorch MLP | 0.021 | 0.0014 | 0.0050 |
-| **Post-stall ($\alpha \ge 10^\circ$)** | PyTorch MLP | 0.082 | 0.0048 | 0.0135 |
-
-*Note: Models perform exceptionally well in the linear regime ($\alpha < 10^\circ$). Error increases near stall angles ($\alpha \ge 10^\circ$) due to highly non-linear separation flow physics, illustrating a key limitation of machine learning surrogates.*
+| **All Test Conditions** | Linear Regression | 0.0402 | 0.0107 | 0.0092 |
+| | KNN Regressor | 0.0629 | 0.0020 | 0.0419 |
+| | Random Forest | 0.0739 | 0.0017 | 0.0457 |
+| | MLP Regressor | 0.0915 | 0.0254 | 0.0555 |
 
 ---
 
-## License
-MIT License. Created by Rohit Bala.
+## 🎓 Key Learnings for Course Report
+1. **Model Capacity vs. Generalization:** Simpler models (like KNN and Random Forest) often generalize better on small, structured physical datasets than deep neural networks (MLP) which can overfit training shapes easily.
+2. **Feature Scaling Importance:** Distance-based models (KNN) and Gradient-based models (MLP) require standard normalization (`StandardScaler`), whereas Decision Trees are scale-invariant.
+3. **Stall Regime Non-Linearity:** All models experience increased errors at high angles of attack ($\alpha \ge 10^\circ$), illustrating the physical limitations of surrogate regression during fluid separation.
